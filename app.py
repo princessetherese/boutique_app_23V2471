@@ -1,8 +1,8 @@
-# app_supabase_sync.py - Version avec synchronisation Supabase
+# app_final_supabase_corrected.py - Version avec 'age' au lieu de 'âge'
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 from sklearn.metrics import r2_score, silhouette_score
+from supabase import create_client, Client
 import time
 import warnings
 warnings.filterwarnings('ignore')
@@ -18,114 +19,139 @@ warnings.filterwarnings('ignore')
 SUPABASE_URL = "https://lojxytucxpxvxvqdelue.supabase.co"
 SUPABASE_ANON_KEY = "sb_publishable_dABCJ88o2IvCZTrPHpuR3g_A0zl6Q57"
 
-try:
-    from supabase import create_client, Client
-    supabase_available = True
-except ImportError:
-    supabase_available = False
-    st.warning("⚠️ Supabase non installé. Installation: pip install supabase")
+@st.cache_resource
+def init_supabase() -> Client:
+    """Initialise la connexion Supabase"""
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-def init_supabase():
-    if supabase_available:
-        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    return None
-
-# ==================== FONCTIONS SUPABASE ====================
-def save_client_to_supabase(supabase, client_data):
-    """Sauvegarde un client dans Supabase"""
+def load_clients_from_supabase(supabase):
+    """Charge les clients depuis Supabase"""
     try:
-        data = {
-            'client_id': int(client_data['client_id']),
-            'nom': client_data['nom'],
-            'email': client_data['email'],
-            'age': int(client_data['âge']),
-            'ville': client_data['ville'],
-            'revenu_annuel_fcfa': int(client_data['revenu_annuel_fcfa']),
-            'ca_total_fcfa': int(client_data['ca_total_fcfa']),
-            'nb_achats': int(client_data['nb_achats'])
-        }
-        supabase.table('clients').upsert(data).execute()
-        return True
-    except Exception as e:
-        return False
-
-def save_order_to_supabase(supabase, order_data):
-    """Sauvegarde une commande dans Supabase"""
-    try:
-        data = {
-            'date': order_data['date'].isoformat() if hasattr(order_data['date'], 'isoformat') else order_data['date'],
-            'client_id': int(order_data['client_id']),
-            'produits': ','.join(order_data['produits']),
-            'montant_fcfa': int(order_data['montant_fcfa']),
-            'mode_paiement': order_data['mode_paiement'],
-            'nb_articles': int(order_data['nb_articles'])
-        }
-        supabase.table('commandes').insert(data).execute()
-        return True
-    except Exception as e:
-        print(f"Erreur: {e}")
-        return False
-
-def load_all_clients_from_supabase(supabase):
-    """Charge tous les clients depuis Supabase"""
-    try:
-        result = supabase.table('clients').select('*').execute()
+        result = supabase.table('clients').select('*').order('client_id').execute()
         if result.data:
-            df = pd.DataFrame(result.data)
-            df = df.rename(columns={
-                'age': 'âge',
-                'client_id': 'client_id',
-                'nom': 'nom',
-                'email': 'email',
-                'ville': 'ville',
-                'revenu_annuel_fcfa': 'revenu_annuel_fcfa',
-                'ca_total_fcfa': 'ca_total_fcfa',
-                'nb_achats': 'nb_achats'
-            })
-            return df
+            return pd.DataFrame(result.data)
         return None
-    except:
+    except Exception as e:
+        st.error(f"Erreur chargement clients: {e}")
         return None
 
-def load_all_orders_from_supabase(supabase):
-    """Charge toutes les commandes depuis Supabase"""
+def load_orders_from_supabase(supabase):
+    """Charge les commandes depuis Supabase"""
     try:
         result = supabase.table('commandes').select('*').order('date', desc=True).execute()
         if result.data:
             orders = []
-            for item in result.data:
-                orders.append({
-                    'date': pd.to_datetime(item['date']),
-                    'client_id': item['client_id'],
-                    'produits': item['produits'].split(','),
-                    'montant_fcfa': item['montant_fcfa'],
-                    'mode_paiement': item['mode_paiement'],
-                    'nb_articles': item['nb_articles']
-                })
+            for row in result.data:
+                order = {
+                    'date': row['date'],
+                    'client_id': row['client_id'],
+                    'produits': row['produits'].split(',') if row['produits'] else [],
+                    'montant_fcfa': row['montant_fcfa'],
+                    'mode_paiement': row['mode_paiement'],
+                    'nb_articles': row['nb_articles']
+                }
+                orders.append(order)
             return orders
-        return None
-    except:
-        return None
+        return []
+    except Exception as e:
+        st.error(f"Erreur chargement commandes: {e}")
+        return []
 
-def sync_all_to_supabase(supabase, df_clients, historique_achats):
-    """Synchronise toutes les données vers Supabase"""
-    if not supabase:
-        return 0, 0
-    
-    clients_saved = 0
-    orders_saved = 0
-    
-    # Sauvegarde des clients
-    for _, client in df_clients.iterrows():
-        if save_client_to_supabase(supabase, client.to_dict()):
-            clients_saved += 1
-    
-    # Sauvegarde des commandes
-    for order in historique_achats:
-        if save_order_to_supabase(supabase, order):
-            orders_saved += 1
-    
-    return clients_saved, orders_saved
+def check_client_exists(supabase, client_id):
+    """Vérifie si un client existe dans Supabase"""
+    try:
+        result = supabase.table('clients').select('client_id').eq('client_id', client_id).execute()
+        return len(result.data) > 0
+    except:
+        return False
+
+def save_client_to_supabase(supabase, client_data):
+    """Sauvegarde un nouveau client dans Supabase"""
+    try:
+        # Vérifier si le client existe déjà
+        if check_client_exists(supabase, client_data['client_id']):
+            return True
+        
+        data = {
+            'client_id': client_data['client_id'],
+            'nom': client_data['nom'],
+            'email': client_data['email'],
+            'age': client_data['age'],
+            'ville': client_data['ville'],
+            'revenu_annuel_fcfa': client_data['revenu_annuel_fcfa'],
+            'ca_total_fcfa': 0,
+            'nb_achats': 0,
+            'date_inscription': datetime.now().isoformat()
+        }
+        result = supabase.table('clients').insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erreur sauvegarde client: {e}")
+        return False
+
+def save_order_to_supabase(supabase, client_id, order_data):
+    """Sauvegarde une commande dans Supabase"""
+    try:
+        # Vérifier que le client existe dans Supabase
+        if not check_client_exists(supabase, client_id):
+            st.error(f"Le client {client_id} n'existe pas dans Supabase. Veuillez d'abord créer le client.")
+            return False
+        
+        data = {
+            'client_id': client_id,
+            'date': datetime.now().isoformat(),
+            'montant_fcfa': order_data['montant_total'],
+            'nb_articles': order_data['nb_articles'],
+            'produits': ','.join(order_data['produits']),
+            'mode_paiement': order_data['mode_paiement'],
+            'categorie_principale': order_data.get('categorie_principale', '')
+        }
+        result = supabase.table('commandes').insert(data).execute()
+        
+        # Mettre à jour les stats du client
+        try:
+            supabase.rpc('update_client_stats', {'p_client_id': client_id}).execute()
+        except:
+            # Si la fonction RPC n'existe pas, on met à jour manuellement
+            current = supabase.table('clients').select('ca_total_fcfa, nb_achats').eq('client_id', client_id).execute()
+            if current.data:
+                new_ca = current.data[0]['ca_total_fcfa'] + order_data['montant_total']
+                new_nb = current.data[0]['nb_achats'] + 1
+                supabase.table('clients').update({
+                    'ca_total_fcfa': new_ca,
+                    'nb_achats': new_nb
+                }).eq('client_id', client_id).execute()
+        
+        return True
+    except Exception as e:
+        st.error(f"Erreur sauvegarde: {e}")
+        return False
+
+def sync_client_to_supabase(supabase, client_row):
+    """Synchronise un client local vers Supabase"""
+    try:
+        client_id = int(client_row['client_id'])
+        
+        # Vérifier si le client existe déjà
+        if check_client_exists(supabase, client_id):
+            return True
+        
+        client_data = {
+            'client_id': client_id,
+            'nom': client_row['nom'],
+            'email': client_row['email'],
+            'age': int(client_row['age']),
+            'ville': client_row['ville'],
+            'revenu_annuel_fcfa': int(client_row['revenu_annuel_fcfa']),
+            'ca_total_fcfa': int(client_row['ca_total_fcfa']),
+            'nb_achats': int(client_row['nb_achats']),
+            'date_inscription': datetime.now().isoformat()
+        }
+        result = supabase.table('clients').insert(client_data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erreur synchronisation client {client_id}: {e}")
+        return False
 
 # ==================== CONFIGURATION ====================
 st.set_page_config(
@@ -304,37 +330,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== INITIALISATION ====================
+# ==================== INITIALISATION AVEC SUPABASE ====================
 supabase = init_supabase()
 
-# Vérifier si les données existent déjà en base
-existing_clients = load_all_clients_from_supabase(supabase) if supabase else None
-existing_orders = load_all_orders_from_supabase(supabase) if supabase else None
+# Charger les données depuis Supabase
+df_clients_supabase = load_clients_from_supabase(supabase)
+historique_achats_supabase = load_orders_from_supabase(supabase)
 
-if existing_clients is not None and len(existing_clients) > 0:
-    # Charger depuis Supabase
-    st.session_state.df_clients = existing_clients
-    st.session_state.historique_achats = existing_orders if existing_orders else []
-    st.session_state.data_source = "Supabase"
-    st.session_state.synced = True
+if df_clients_supabase is not None and len(df_clients_supabase) > 0:
+    st.session_state.df_clients = df_clients_supabase
 else:
-    # Générer les données locales
+    # Fallback: générer des données locales si Supabase n'est pas accessible
     np.random.seed(42)
     n = 100
-    
     st.session_state.df_clients = pd.DataFrame({
         'client_id': range(1, n+1),
         'nom': [f"Client_{i}" for i in range(1, n+1)],
         'email': [f"client{i}@email.com" for i in range(1, n+1)],
-        'âge': np.random.normal(35, 12, n).clip(18, 70).astype(int),
+        'age': np.random.normal(35, 12, n).clip(18, 70).astype(int),
         'ville': np.random.choice(['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'], n),
         'revenu_annuel_fcfa': np.random.normal(2_500_000, 800_000, n).clip(1_000_000, 8_000_000).astype(int),
         'ca_total_fcfa': np.random.exponential(500000, n).astype(int),
         'nb_achats': np.random.poisson(3, n)
     })
-    st.session_state.historique_achats = []
-    st.session_state.data_source = "Local"
-    st.session_state.synced = False
+    
+    # Synchroniser TOUS les clients locaux vers Supabase
+    with st.spinner("Synchronisation des clients vers Supabase..."):
+        for _, client in st.session_state.df_clients.iterrows():
+            sync_client_to_supabase(supabase, client)
+
+if 'historique_achats' not in st.session_state:
+    if historique_achats_supabase:
+        st.session_state.historique_achats = historique_achats_supabase
+    else:
+        st.session_state.historique_achats = []
 
 # ==================== CATALOGUE PRODUITS ====================
 PRODUITS = {
@@ -364,6 +393,24 @@ def format_fcfa(x):
     return f"{x:,.0f} FCFA".replace(",", " ")
 
 def enregistrer_achat(client_id, produits_achetes, montant_total, mode_paiement):
+    """Enregistre un achat dans Supabase et localement"""
+    
+    # Vérifier que le client existe dans Supabase (si c'est un nouveau client local)
+    if not check_client_exists(supabase, client_id):
+        # Récupérer les infos du client depuis st.session_state
+        client_info = st.session_state.df_clients[st.session_state.df_clients['client_id'] == client_id].iloc[0]
+        client_data = {
+            'client_id': int(client_id),
+            'nom': client_info['nom'],
+            'email': client_info['email'],
+            'age': int(client_info['age']),
+            'ville': client_info['ville'],
+            'revenu_annuel_fcfa': int(client_info['revenu_annuel_fcfa']),
+            'ca_total_fcfa': 0,
+            'nb_achats': 0
+        }
+        save_client_to_supabase(supabase, client_data)
+    
     achat = {
         'date': datetime.now(),
         'client_id': client_id,
@@ -378,42 +425,31 @@ def enregistrer_achat(client_id, produits_achetes, montant_total, mode_paiement)
     st.session_state.df_clients.loc[idx, 'ca_total_fcfa'] += montant_total
     st.session_state.df_clients.loc[idx, 'nb_achats'] += 1
     
-    # Sauvegarder dans Supabase si disponible
-    if supabase:
-        save_client_to_supabase(supabase, st.session_state.df_clients.loc[idx].to_dict())
-        save_order_to_supabase(supabase, achat)
+    # Sauvegarder dans Supabase
+    order_data = {
+        'montant_total': montant_total,
+        'nb_articles': len(produits_achetes),
+        'produits': produits_achetes,
+        'mode_paiement': mode_paiement,
+        'categorie_principale': ''
+    }
+    success = save_order_to_supabase(supabase, client_id, order_data)
     
-    return True
+    return success
 
 # ==================== HEADER ====================
-data_source = st.session_state.get('data_source', 'Local')
-st.markdown(f"""
+st.markdown("""
 <div class="main-header">
     <h1><i class="fas fa-store"></i> ShopAnalyzer Pro</h1>
     <p><i class="fas fa-chart-line"></i> Plateforme intelligente de collecte et d'analyse de données e-commerce</p>
     <p style="font-size: 0.85rem; margin-top: 0.5rem;">
-        <i class="fas fa-database"></i> Source: <strong>{data_source}</strong> | 
-        <i class="fas fa-users"></i> {len(st.session_state.df_clients)} clients | 
-        <i class="fas fa-shopping-cart"></i> {len(st.session_state.historique_achats)} commandes
+        <i class="fas fa-mobile-alt"></i> Interface responsive | 
+        <i class="fab fa-font-awesome"></i> Icônes Font Awesome | 
+        <i class="fas fa-chart-bar"></i> Analyse descriptive incluse |
+        <i class="fas fa-database"></i> Données sauvegardées sur Supabase
     </p>
 </div>
 """, unsafe_allow_html=True)
-
-# Bouton de synchronisation manuelle
-if supabase and not st.session_state.get('synced', False):
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🔄 Synchroniser les 100 clients avec Supabase", use_container_width=True):
-            with st.spinner("Synchronisation en cours..."):
-                clients_saved, orders_saved = sync_all_to_supabase(
-                    supabase, 
-                    st.session_state.df_clients, 
-                    st.session_state.historique_achats
-                )
-                st.session_state.synced = True
-                st.success(f"✅ Synchronisation terminée ! {clients_saved} clients et {orders_saved} commandes sauvegardés dans Supabase.")
-                time.sleep(2)
-                st.rerun()
 
 # ==================== SIDEBAR ====================
 with st.sidebar:
@@ -451,9 +487,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Développé par **Armelle** | Version Supabase")
 
-# ==================== RESTE DU CODE (PAGES) ====================
-# [Le reste de votre code pour les pages reste exactement identique]
-# PAGE 1: FORMULAIRE
+# ==================== PAGE 1: NOUVELLE COMMANDE ====================
 if menu == "Nouvelle Commande":
     st.markdown("## 🛒 Passer une commande")
     
@@ -552,13 +586,24 @@ if menu == "Nouvelle Commande":
                             'client_id': [new_id],
                             'nom': [nom],
                             'email': [email],
-                            'âge': [age],
+                            'age': [age],
                             'ville': [ville],
                             'revenu_annuel_fcfa': [0],
                             'ca_total_fcfa': [0],
                             'nb_achats': [0]
                         })
                         st.session_state.df_clients = pd.concat([st.session_state.df_clients, nouveau_client], ignore_index=True)
+                        
+                        # CRUCIAL: Sauvegarder le nouveau client dans Supabase AVANT la commande
+                        client_data = {
+                            'client_id': new_id,
+                            'nom': nom,
+                            'email': email,
+                            'age': age,
+                            'ville': ville,
+                            'revenu_annuel_fcfa': 0
+                        }
+                        save_client_to_supabase(supabase, client_data)
                         client_id = new_id
                     else:
                         client_id = client_id
@@ -566,8 +611,10 @@ if menu == "Nouvelle Commande":
                     if enregistrer_achat(client_id, produits_selectionnes, montant_total, mode_paiement):
                         st.balloons()
                         st.success(f"🎉 Commande confirmée ! Merci pour votre achat de {format_fcfa(montant_total)}")
+                    else:
+                        st.error("❌ Erreur lors de l'enregistrement de la commande")
 
-# PAGE 2: DASHBOARD
+# ==================== PAGE 2: TABLEAU DE BORD ====================
 elif menu == "Tableau de Bord":
     st.markdown("## 📊 Tableau de bord")
     
@@ -638,100 +685,497 @@ elif menu == "Tableau de Bord":
                 fig.update_layout(height=400)
                 st.plotly_chart(fig, use_container_width=True)
 
-# PAGE 3: ANALYSE DESCRIPTIVE (version simplifiée pour garder la place)
+# ==================== PAGE 3: ANALYSE DESCRIPTIVE ====================
 elif menu == "Analyse Descriptive":
     st.markdown("## 📊 Analyse descriptive des données")
     st.markdown("*Statistiques détaillées et visualisations exploratoires*")
     
+    # Sélection du jeu de données
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Clients", "🛍️ Ventes", "🏷️ Produits & Catégories", "⭐ Fidélité clients", "📈 Corrélations"])
     
     with tab1:
         st.markdown("### Analyse des clients")
+        
         df_clients = st.session_state.df_clients
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("👥 Total clients", len(df_clients))
-        with col2:
-            st.metric("📅 Âge moyen", f"{df_clients['âge'].mean():.0f} ans")
-        with col3:
-            st.metric("💰 Revenu moyen", format_fcfa(df_clients['revenu_annuel_fcfa'].mean()))
-        with col4:
-            st.metric("💵 CA moyen/client", format_fcfa(df_clients['ca_total_fcfa'].mean()))
+        # 1. Statistiques générales
+        st.markdown("#### 📊 Statistiques générales")
         
-        fig_ages = px.histogram(df_clients, x='âge', nbins=30, title="Distribution des âges")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-users" style="font-size: 1.5rem; color: #667eea;"></i>
+                <div style="font-size: 0.8rem;">Total clients</div>
+                <div style="font-size: 1.5rem; font-weight: bold;">{len(df_clients)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            age_moyen = df_clients['age'].mean()
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-calendar" style="font-size: 1.5rem; color: #667eea;"></i>
+                <div style="font-size: 0.8rem;">Âge moyen</div>
+                <div style="font-size: 1.5rem; font-weight: bold;">{age_moyen:.1f} ans</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col3:
+            revenu_moyen = df_clients['revenu_annuel_fcfa'].mean()
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-money-bill" style="font-size: 1.5rem; color: #667eea;"></i>
+                <div style="font-size: 0.8rem;">Revenu moyen</div>
+                <div style="font-size: 1rem; font-weight: bold;">{format_fcfa(revenu_moyen)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col4:
+            ca_moyen = df_clients['ca_total_fcfa'].mean()
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-chart-line" style="font-size: 1.5rem; color: #667eea;"></i>
+                <div style="font-size: 0.8rem;">CA moyen/client</div>
+                <div style="font-size: 1rem; font-weight: bold;">{format_fcfa(ca_moyen)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # 2. Distribution des âges
+        st.markdown("#### 📈 Distribution des âges")
+        fig_ages = px.histogram(df_clients, x='age', nbins=30,
+                                title="Distribution des âges des clients",
+                                labels={'age':'Âge', 'count':'Nombre de clients'},
+                                color_discrete_sequence=['#667eea'])
+        fig_ages.add_vline(x=df_clients['age'].mean(), line_dash="dash", line_color="red",
+                          annotation_text=f"Moyenne: {df_clients['age'].mean():.1f}")
         st.plotly_chart(fig_ages, use_container_width=True)
         
-        ville_counts = df_clients['ville'].value_counts()
-        fig_ville = px.pie(values=ville_counts.values, names=ville_counts.index, title="Clients par ville")
-        st.plotly_chart(fig_ville, use_container_width=True)
+        # 3. Répartition par ville
+        st.markdown("#### 🗺️ Répartition géographique")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            ville_counts = df_clients['ville'].value_counts()
+            fig_ville = px.pie(values=ville_counts.values, names=ville_counts.index,
+                              title="Clients par ville",
+                              color_discrete_sequence=px.colors.sequential.Viridis)
+            st.plotly_chart(fig_ville, use_container_width=True)
+        
+        with col2:
+            # CA moyen par ville
+            ca_par_ville = df_clients.groupby('ville')['ca_total_fcfa'].mean().sort_values(ascending=True)
+            fig_ca_ville = px.bar(x=ca_par_ville.values, y=ca_par_ville.index,
+                                  orientation='h', title="CA moyen par ville (FCFA)",
+                                  labels={'x':'CA moyen', 'y':'Ville'},
+                                  color=ca_par_ville.values, color_continuous_scale='Viridis')
+            st.plotly_chart(fig_ca_ville, use_container_width=True)
+        
+        # 4. Boxplot des revenus par tranche d'âge
+        st.markdown("#### 📊 Revenu par tranche d'âge")
+        df_clients['tranche_age'] = pd.cut(df_clients['age'], bins=[18, 25, 35, 45, 55, 70],
+                                           labels=['18-25', '26-35', '36-45', '46-55', '56+'])
+        fig_revenu_age = px.box(df_clients, x='tranche_age', y='revenu_annuel_fcfa',
+                                title="Distribution des revenus par tranche d'âge",
+                                labels={'tranche_age':'Tranche d\'âge', 'revenu_annuel_fcfa':'Revenu annuel (FCFA)'})
+        st.plotly_chart(fig_revenu_age, use_container_width=True)
+        
+        # 5. Tableau des statistiques détaillées
+        st.markdown("#### 📋 Tableau des statistiques descriptives")
+        stats_desc = df_clients[['age', 'revenu_annuel_fcfa', 'ca_total_fcfa', 'nb_achats']].describe()
+        stats_desc = stats_desc.round(0)
+        stats_desc.index = ['Nombre', 'Moyenne', 'Écart-type', 'Min', '25%', 'Médiane', '75%', 'Max']
+        st.dataframe(stats_desc, use_container_width=True)
     
     with tab2:
         st.markdown("### Analyse des ventes")
+        
         if st.session_state.historique_achats:
             df_ventes = pd.DataFrame(st.session_state.historique_achats)
             df_ventes['date'] = pd.to_datetime(df_ventes['date'])
             
+            # 1. Métriques des ventes
             col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
-                st.metric("💰 CA Total", format_fcfa(df_ventes['montant_fcfa'].sum()))
+                total_ventes = df_ventes['montant_fcfa'].sum()
+                st.markdown(f"""
+                <div class="stats-box">
+                    <i class="fas fa-shopping-cart" style="font-size: 1.5rem;"></i>
+                    <div>CA Total</div>
+                    <div style="font-weight: bold;">{format_fcfa(total_ventes)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             with col2:
-                st.metric("📦 Nb commandes", len(df_ventes))
+                nb_ventes = len(df_ventes)
+                st.markdown(f"""
+                <div class="stats-box">
+                    <i class="fas fa-receipt" style="font-size: 1.5rem;"></i>
+                    <div>Nombre ventes</div>
+                    <div style="font-weight: bold;">{nb_ventes}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             with col3:
-                st.metric("🛒 Panier moyen", format_fcfa(df_ventes['montant_fcfa'].mean()))
+                panier_moyen = df_ventes['montant_fcfa'].mean()
+                st.markdown(f"""
+                <div class="stats-box">
+                    <i class="fas fa-basket-shopping" style="font-size: 1.5rem;"></i>
+                    <div>Panier moyen</div>
+                    <div style="font-weight: bold;">{format_fcfa(panier_moyen)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             with col4:
-                st.metric("📊 Articles/commande", f"{df_ventes['nb_articles'].mean():.1f}")
+                articles_moyen = df_ventes['nb_articles'].mean()
+                st.markdown(f"""
+                <div class="stats-box">
+                    <i class="fas fa-box" style="font-size: 1.5rem;"></i>
+                    <div>Articles/commande</div>
+                    <div style="font-weight: bold;">{articles_moyen:.1f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 2. Évolution temporelle
+            st.markdown("#### 📈 Évolution des ventes dans le temps")
             
             ventes_jour = df_ventes.groupby(df_ventes['date'].dt.date)['montant_fcfa'].sum().reset_index()
-            fig_evol = px.line(ventes_jour, x='date', y='montant_fcfa', title="Évolution du CA", markers=True)
+            fig_evol = px.line(ventes_jour, x='date', y='montant_fcfa',
+                              title="Évolution du chiffre d'affaires",
+                              labels={'date':'Date', 'montant_fcfa':'CA (FCFA)'},
+                              markers=True)
             st.plotly_chart(fig_evol, use_container_width=True)
             
+            # 3. Distribution des montants
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig_montants = px.histogram(df_ventes, x='montant_fcfa', nbins=30,
+                                           title="Distribution des montants d'achat",
+                                           labels={'montant_fcfa':'Montant (FCFA)', 'count':'Nombre de ventes'})
+                st.plotly_chart(fig_montants, use_container_width=True)
+            
+            with col2:
+                fig_articles = px.histogram(df_ventes, x='nb_articles', nbins=10,
+                                           title="Distribution du nombre d'articles",
+                                           labels={'nb_articles':'Nombre d\'articles', 'count':'Nombre de commandes'})
+                st.plotly_chart(fig_articles, use_container_width=True)
+            
+            # 4. Modes de paiement
+            st.markdown("#### 💳 Modes de paiement")
             paiements_counts = df_ventes['mode_paiement'].value_counts()
-            fig_paiements = px.pie(values=paiements_counts.values, names=paiements_counts.index, title="Modes de paiement")
+            fig_paiements = px.pie(values=paiements_counts.values, names=paiements_counts.index,
+                                  title="Répartition des modes de paiement",
+                                  color_discrete_sequence=px.colors.qualitative.Set3)
             st.plotly_chart(fig_paiements, use_container_width=True)
+            
         else:
-            st.info("Aucune vente enregistrée")
+            st.info("📊 Aucune vente enregistrée pour le moment. Effectuez des achats pour voir l'analyse !")
     
+    # ==================== PRODUITS LES PLUS RENTABLES & ANALYSE PAR CATÉGORIE ====================
     with tab3:
-        st.markdown("### Analyse des produits")
+        st.markdown("### Analyse des produits et catégories")
+        
         if st.session_state.historique_achats:
+            df_ventes = pd.DataFrame(st.session_state.historique_achats)
+            
+            # Extraction de tous les produits vendus
             tous_produits = []
-            for cmd in st.session_state.historique_achats:
-                tous_produits.extend(cmd['produits'])
+            for cmd in df_ventes['produits']:
+                if isinstance(cmd, list):
+                    for p in cmd:
+                        tous_produits.append(p)
+                else:
+                    tous_produits.append(cmd)
             
             if tous_produits:
+                # 1. Produits les plus vendus (quantité)
+                st.markdown("#### 🏆 Produits les plus vendus (quantité)")
                 top_ventes = pd.Series(tous_produits).value_counts().head(10)
-                fig_top = px.bar(x=top_ventes.values, y=top_ventes.index, orientation='h', title="Top 10 des produits")
-                fig_top.update_layout(height=500)
-                st.plotly_chart(fig_top, use_container_width=True)
+                fig_top_ventes = px.bar(x=top_ventes.values, y=top_ventes.index, orientation='h',
+                                        title="Top 10 des produits les plus commandés",
+                                        labels={'x':'Nombre de ventes', 'y':'Produit'},
+                                        color=top_ventes.values, color_continuous_scale='Viridis')
+                fig_top_ventes.update_layout(height=500)
+                st.plotly_chart(fig_top_ventes, use_container_width=True)
+                
+                # 2. Produits les plus rentables (chiffre d'affaires généré)
+                st.markdown("#### 💰 Produits les plus rentables (CA généré)")
+                
+                # Calcul du CA par produit
+                ca_par_produit = {}
+                for cmd in df_ventes.to_dict('records'):
+                    if isinstance(cmd['produits'], list):
+                        nb_produits = len(cmd['produits'])
+                        if nb_produits > 0:
+                            # Répartition proportionnelle du montant entre produits
+                            montant_par_produit = cmd['montant_fcfa'] / nb_produits
+                            for p in cmd['produits']:
+                                ca_par_produit[p] = ca_par_produit.get(p, 0) + montant_par_produit
+                
+                if ca_par_produit:
+                    top_rentables = pd.Series(ca_par_produit).sort_values(ascending=False).head(10)
+                    fig_top_rentables = px.bar(x=top_rentables.values, y=top_rentables.index, orientation='h',
+                                               title="Top 10 des produits par chiffre d'affaires généré",
+                                               labels={'x':'CA généré (FCFA)', 'y':'Produit'},
+                                               color=top_rentables.values, color_continuous_scale='Blues')
+                    fig_top_rentables.update_layout(height=500)
+                    st.plotly_chart(fig_top_rentables, use_container_width=True)
+                    
+                    # Afficher les valeurs
+                    st.markdown("**Détail des produits les plus rentables :**")
+                    for produit, ca in top_rentables.head(5).items():
+                        st.markdown(f"- {produit}: **{format_fcfa(ca)}**")
+                
+                # 3. Analyse par catégorie
+                st.markdown("#### 📊 Analyse par catégorie")
+                
+                # Récupération des catégories
+                categories_produits = {}
+                for produit in PRODUITS.keys():
+                    categories_produits[produit] = PRODUITS[produit]['categorie']
+                
+                # Déterminer la catégorie de chaque produit vendu
+                categories_vendues = []
+                for p in tous_produits:
+                    if p in categories_produits:
+                        categories_vendues.append(categories_produits[p])
+                
+                if categories_vendues:
+                    col_cat1, col_cat2 = st.columns(2)
+                    
+                    with col_cat1:
+                        # Nombre de ventes par catégorie
+                        cat_counts = pd.Series(categories_vendues).value_counts()
+                        fig_cat_ventes = px.pie(values=cat_counts.values, names=cat_counts.index,
+                                                title="Répartition des ventes par catégorie",
+                                                color_discrete_sequence=px.colors.qualitative.Set3)
+                        st.plotly_chart(fig_cat_ventes, use_container_width=True)
+                    
+                    with col_cat2:
+                        # CA par catégorie
+                        ca_par_categorie = {}
+                        for cmd in df_ventes.to_dict('records'):
+                            if isinstance(cmd['produits'], list):
+                                nb_produits = len(cmd['produits'])
+                                if nb_produits > 0:
+                                    montant_par_produit = cmd['montant_fcfa'] / nb_produits
+                                    for p in cmd['produits']:
+                                        if p in categories_produits:
+                                            cat = categories_produits[p]
+                                            ca_par_categorie[cat] = ca_par_categorie.get(cat, 0) + montant_par_produit
+                        
+                        if ca_par_categorie:
+                            ca_cat_df = pd.DataFrame({
+                                'Catégorie': list(ca_par_categorie.keys()),
+                                'CA (FCFA)': list(ca_par_categorie.values())
+                            }).sort_values('CA (FCFA)', ascending=True)
+                            
+                            fig_ca_cat = px.bar(ca_cat_df, x='CA (FCFA)', y='Catégorie', orientation='h',
+                                               title="Chiffre d'affaires par catégorie",
+                                               color='CA (FCFA)', color_continuous_scale='Blues')
+                            st.plotly_chart(fig_ca_cat, use_container_width=True)
+                    
+                    # 4. Performance par catégorie (prix moyen, popularité)
+                    st.markdown("#### 📈 Performance détaillée par catégorie")
+                    
+                    perf_categories = []
+                    for cat in cat_counts.index:
+                        produits_cat = [p for p, c in categories_produits.items() if c == cat]
+                        prix_moyen = np.mean([PRODUITS[p]['prix'] for p in produits_cat if p in PRODUITS])
+                        perf_categories.append({
+                            'Catégorie': cat,
+                            'Nb ventes': cat_counts[cat],
+                            'Prix moyen': prix_moyen,
+                            'CA total': ca_par_categorie.get(cat, 0)
+                        })
+                    
+                    df_perf = pd.DataFrame(perf_categories)
+                    df_perf['Nb ventes'] = df_perf['Nb ventes'].astype(int)
+                    df_perf['Prix moyen'] = df_perf['Prix moyen'].apply(format_fcfa)
+                    df_perf['CA total'] = df_perf['CA total'].apply(format_fcfa)
+                    st.dataframe(df_perf, use_container_width=True)
+                    
+                    # Insight
+                    meilleure_cat = cat_counts.index[0]
+                    st.success(f"💡 **Insight :** La catégorie **{meilleure_cat}** est la plus populaire avec {cat_counts[meilleure_cat]} ventes.")
+                
+            else:
+                st.info("Aucune donnée de produit disponible")
+        else:
+            st.info("📊 Aucune vente enregistrée. Effectuez des achats pour voir l'analyse des produits !")
     
+    # ==================== FIDÉLITÉ CLIENTS ====================
     with tab4:
-        st.markdown("### Fidélité clients")
-        df_clients = st.session_state.df_clients
+        st.markdown("### Analyse de la fidélité clients")
+        
+        df_clients = st.session_state.df_clients.copy()
+        
+        # 1. Métriques de fidélité
+        st.markdown("#### 📊 Indicateurs de fidélité")
+        
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        
         clients_actifs = len(df_clients[df_clients['nb_achats'] > 0])
         clients_fideles = len(df_clients[df_clients['nb_achats'] >= 3])
+        clients_vip = len(df_clients[df_clients['ca_total_fcfa'] > 1_000_000])
+        taux_fidelisation = (clients_fideles / clients_actifs * 100) if clients_actifs > 0 else 0
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("👥 Clients actifs", clients_actifs)
-        with col2:
-            st.metric("⭐ Clients fidèles", clients_fideles)
-        with col3:
-            taux = (clients_fideles / clients_actifs * 100) if clients_actifs > 0 else 0
-            st.metric("📈 Taux fidélisation", f"{taux:.1f}%")
+        with col_f1:
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-user-check" style="font-size: 1.5rem; color: #48bb78;"></i>
+                <div style="font-size: 0.7rem;">Clients actifs</div>
+                <div style="font-size: 1.3rem; font-weight: bold;">{clients_actifs}</div>
+            </div>
+            """, unsafe_allow_html=True)
         
-        fig_achats = px.histogram(df_clients, x='nb_achats', nbins=15, title="Distribution des achats")
+        with col_f2:
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-star" style="font-size: 1.5rem; color: #f6e05e;"></i>
+                <div style="font-size: 0.7rem;">Clients fidèles (3+ achats)</div>
+                <div style="font-size: 1.3rem; font-weight: bold;">{clients_fideles}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col_f3:
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-crown" style="font-size: 1.5rem; color: #ed8936;"></i>
+                <div style="font-size: 0.7rem;">Clients VIP (CA > 1M FCFA)</div>
+                <div style="font-size: 1.3rem; font-weight: bold;">{clients_vip}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col_f4:
+            st.markdown(f"""
+            <div class="stats-box">
+                <i class="fas fa-chart-line" style="font-size: 1.5rem; color: #667eea;"></i>
+                <div style="font-size: 0.7rem;">Taux de fidélisation</div>
+                <div style="font-size: 1.3rem; font-weight: bold;">{taux_fidelisation:.1f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # 2. Distribution des clients par nombre d'achats
+        st.markdown("#### 📈 Distribution du nombre d'achats par client")
+        
+        fig_achats = px.histogram(df_clients, x='nb_achats', nbins=15,
+                                  title="Répartition des clients selon leur nombre d'achats",
+                                  labels={'nb_achats':'Nombre d\'achats', 'count':'Nombre de clients'},
+                                  color_discrete_sequence=['#667eea'])
+        fig_achats.add_vline(x=df_clients['nb_achats'].mean(), line_dash="dash", line_color="red",
+                            annotation_text=f"Moyenne: {df_clients['nb_achats'].mean():.1f}")
         st.plotly_chart(fig_achats, use_container_width=True)
+        
+        # 3. Segmentation par fidélité
+        st.markdown("#### 🎯 Segmentation par niveau de fidélité")
+        
+        # Création des segments
+        df_clients['segment_fidelite'] = pd.cut(df_clients['nb_achats'], 
+                                                bins=[-1, 0, 1, 2, 5, 100],
+                                                labels=['Inactifs', 'Nouveaux', 'Occasionnels', 'Fidèles', 'Ambassadeurs'])
+        
+        seg_counts = df_clients['segment_fidelite'].value_counts()
+        fig_seg = px.pie(values=seg_counts.values, names=seg_counts.index,
+                        title="Répartition des clients par niveau de fidélité",
+                        color_discrete_sequence=px.colors.sequential.Viridis)
+        st.plotly_chart(fig_seg, use_container_width=True)
+        
+        # 4. Top des clients fidèles
+        st.markdown("#### 🏆 Top 10 des clients les plus fidèles")
+        top_fideles = df_clients.nlargest(10, 'nb_achats')[['nom', 'nb_achats', 'ca_total_fcfa', 'ville']]
+        top_fideles['ca_total_fcfa'] = top_fideles['ca_total_fcfa'].apply(format_fcfa)
+        st.dataframe(top_fideles, use_container_width=True)
+        
+        # 5. Matrice de fidélité (RFM simplifié)
+        st.markdown("#### 📊 Matrice fidélité - Valeur client")
+        
+        # Création des quartiles
+        df_clients['segment_valeur'] = pd.qcut(df_clients['ca_total_fcfa'].rank(method='first'), 
+                                                q=4, labels=['Bronze', 'Argent', 'Or', 'Platine'])
+        
+        matrice = pd.crosstab(df_clients['segment_fidelite'], df_clients['segment_valeur'])
+        st.dataframe(matrice, use_container_width=True)
+        
+        # 6. Insight
+        st.markdown("#### 💡 Insights sur la fidélité")
+        
+        ca_fideles = df_clients[df_clients['nb_achats'] >= 3]['ca_total_fcfa'].sum()
+        ca_total = df_clients['ca_total_fcfa'].sum()
+        part_fideles = (ca_fideles / ca_total * 100) if ca_total > 0 else 0
+        
+        st.markdown(f"""
+        <div style="background-color: #e3f2fd; padding: 1rem; border-radius: 10px; border-left: 4px solid #2196f3;">
+            <i class="fas fa-lightbulb" style="color: #2196f3;"></i> <strong>Analyse de la fidélité client :</strong><br><br>
+            - Les clients fidèles (3+ achats) représentent <strong>{part_fideles:.1f}%</strong> du chiffre d'affaires total<br>
+            - Un client fidèle dépense en moyenne <strong>{format_fcfa(df_clients[df_clients['nb_achats'] >= 3]['ca_total_fcfa'].mean())}</strong> 
+              contre <strong>{format_fcfa(df_clients[df_clients['nb_achats'] < 3]['ca_total_fcfa'].mean())}</strong> pour un client occasionnel<br>
+            - Taux de rétention estimé : <strong>{(clients_fideles / max(1, len(df_clients[df_clients['nb_achats'] > 0])) * 100):.1f}%</strong><br><br>
+            🎯 <strong>Recommandation :</strong> Mettre en place un programme de fidélité pour les clients ayant effectué 2 achats 
+            pour les transformer en clients fidèles.
+        </div>
+        """, unsafe_allow_html=True)
     
     with tab5:
-        st.markdown("### Corrélations")
+        st.markdown("### Analyse des corrélations")
+        
         df_clients = st.session_state.df_clients
-        cols_corr = ['âge', 'revenu_annuel_fcfa', 'ca_total_fcfa', 'nb_achats']
+        
+        # 1. Matrice de corrélation
+        st.markdown("#### 🔗 Matrice de corrélation")
+        
+        cols_corr = ['age', 'revenu_annuel_fcfa', 'ca_total_fcfa', 'nb_achats']
         corr_matrix = df_clients[cols_corr].corr()
-        fig_corr = px.imshow(corr_matrix, text_auto=True, title="Matrice de corrélation", color_continuous_scale='RdBu')
+        
+        fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto",
+                             title="Matrice de corrélation entre variables",
+                             labels=dict(color="Corrélation"),
+                             color_continuous_scale='RdBu', zmin=-1, zmax=1)
         st.plotly_chart(fig_corr, use_container_width=True)
+        
+        # 2. Interprétation
+        st.markdown("#### 📝 Interprétation des corrélations")
+        
+        corr_age_ca = corr_matrix.loc['age', 'ca_total_fcfa']
+        corr_revenu_ca = corr_matrix.loc['revenu_annuel_fcfa', 'ca_total_fcfa']
+        
+        st.markdown(f"""
+        <div class="info-box">
+            <i class="fas fa-chart-line"></i> <strong>Analyse des corrélations :</strong><br><br>
+            • <strong>Âge vs CA :</strong> Corrélation de {corr_age_ca:.2f} - 
+            {"Corrélation positive faible" if corr_age_ca > 0 else "Corrélation négative"}<br>
+            • <strong>Revenu vs CA :</strong> Corrélation de {corr_revenu_ca:.2f} - 
+            {"Les clients avec un revenu élevé dépensent plus" if abs(corr_revenu_ca) > 0.3 else "Lien modéré entre revenu et dépenses"}<br><br>
+            <i class="fas fa-lightbulb"></i> <strong>Insight :</strong> 
+            {"Le revenu est le facteur le plus prédictif du chiffre d'affaires." if abs(corr_revenu_ca) > abs(corr_age_ca) else "L'âge influence légèrement plus le comportement d'achat que le revenu."}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 3. Scatter plots
+        st.markdown("#### 📊 Relations entre variables")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig_scatter1 = px.scatter(df_clients, x='revenu_annuel_fcfa', y='ca_total_fcfa',
+                                      title="Revenu vs Chiffre d'affaires",
+                                      labels={'revenu_annuel_fcfa':'Revenu (FCFA)', 'ca_total_fcfa':'CA (FCFA)'},
+                                      opacity=0.6,
+                                      hover_data=['nom'])
+            st.plotly_chart(fig_scatter1, use_container_width=True)
+        
+        with col2:
+            fig_scatter2 = px.scatter(df_clients, x='nb_achats', y='ca_total_fcfa',
+                                      title="Nombre d'achats vs Chiffre d'affaires",
+                                      labels={'nb_achats':'Nombre d\'achats', 'ca_total_fcfa':'CA (FCFA)'},
+                                      opacity=0.6,
+                                      hover_data=['nom'])
+            st.plotly_chart(fig_scatter2, use_container_width=True)
 
-# PAGE 4: ANALYSES ML
+# ==================== PAGE 4: ANALYSES ML ====================
 elif menu == "Analyses ML":
     st.markdown("## 📈 Analyses prédictives")
     
@@ -741,42 +1185,108 @@ elif menu == "Analyses ML":
         tab1, tab2, tab3 = st.tabs(["📊 Régression", "🎯 Clustering", "🔮 Prédiction"])
         
         with tab1:
-            X = df_ml[['âge', 'revenu_annuel_fcfa']]
+            st.markdown("### Prédiction du Chiffre d'Affaires")
+            
+            X = df_ml[['age', 'revenu_annuel_fcfa']]
             y = df_ml['ca_total_fcfa']
+            
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            reg_simple = LinearRegression()
+            reg_simple.fit(X_train[['age']], y_train)
+            score_simple = reg_simple.score(X_test[['age']], y_test)
             
             reg_multiple = LinearRegression()
             reg_multiple.fit(X_train, y_train)
             score_multiple = reg_multiple.score(X_test, y_test)
             
-            st.metric("R² Score", f"{max(0, score_multiple):.2%}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Régression simple", f"{max(0, score_simple):.2%}")
+                st.caption("Basée uniquement sur l'âge")
+            with col2:
+                st.metric("Régression multiple", f"{max(0, score_multiple):.2%}")
+                st.caption("Âge + Revenu")
             
-            y_pred = reg_multiple.predict(X_test)
+            # Graphique de comparaison
+            y_pred_multiple = reg_multiple.predict(X_test)
             fig_compare = go.Figure()
-            fig_compare.add_trace(go.Scatter(x=y_test, y=y_pred, mode='markers', name='Prédictions'))
-            fig_compare.add_trace(go.Scatter(x=[y.min(), y.max()], y=[y.min(), y.max()], mode='lines', name='Idéal', line=dict(dash='dash', color='red')))
+            fig_compare.add_trace(go.Scatter(x=y_test, y=y_pred_multiple, mode='markers',
+                                            name='Prédictions', marker=dict(color='#667eea')))
+            fig_compare.add_trace(go.Scatter(x=[y.min(), y.max()], y=[y.min(), y.max()],
+                                            mode='lines', name='Parfait', line=dict(dash='dash', color='red')))
+            fig_compare.update_layout(title="Prédiction vs Réalité (Régression multiple)",
+                                     xaxis_title="CA réel (FCFA)",
+                                     yaxis_title="CA prédit (FCFA)")
             st.plotly_chart(fig_compare, use_container_width=True)
+            
+            # Afficher les coefficients
+            st.markdown("#### 📊 Coefficients du modèle")
+            coef_df = pd.DataFrame({
+                'Variable': ['Âge', 'Revenu annuel'],
+                'Coefficient': [reg_multiple.coef_[0], reg_multiple.coef_[1]]
+            })
+            st.dataframe(coef_df, use_container_width=True)
         
         with tab2:
-            features = df_ml[['âge', 'ca_total_fcfa']]
+            st.markdown("### Segmentation clients")
+            
+            features = df_ml[['age', 'ca_total_fcfa']]
             scaler = StandardScaler()
             features_scaled = scaler.fit_transform(features)
+            
             kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
             df_ml['segment'] = kmeans.fit_predict(features_scaled)
             
-            fig_clust = px.scatter(df_ml, x='ca_total_fcfa', y='âge', color='segment', size='nb_achats', title="Segmentation clients")
+            sil_score = silhouette_score(features_scaled, df_ml['segment'])
+            st.metric("Qualité du clustering (Silhouette)", f"{sil_score:.2%}")
+            
+            fig_clust = px.scatter(df_ml, x='ca_total_fcfa', y='age',
+                                   color='segment', size='nb_achats',
+                                   title="Segmentation des clients",
+                                   labels={'ca_total_fcfa':'CA (FCFA)', 'age':'Âge'},
+                                   color_continuous_scale='Viridis')
             st.plotly_chart(fig_clust, use_container_width=True)
+            
+            # Profil des segments
+            st.markdown("#### 📝 Profil des segments")
+            for seg in sorted(df_ml['segment'].unique()):
+                seg_data = df_ml[df_ml['segment'] == seg]
+                st.markdown(f"""
+                <div class="info-box">
+                    <strong>Segment {seg}</strong> ({len(seg_data)} clients)<br>
+                    Âge moyen: {seg_data['age'].mean():.0f} ans<br>
+                    CA moyen: {format_fcfa(seg_data['ca_total_fcfa'].mean())}<br>
+                    Achats moyen: {seg_data['nb_achats'].mean():.1f}
+                </div>
+                """, unsafe_allow_html=True)
         
         with tab3:
-            age_pred = st.slider("Âge", 18, 70, 35)
-            revenu_pred = st.number_input("Revenu annuel (FCFA)", 500000, 8000000, 2500000)
-            if st.button("Prédire"):
-                pred = reg_multiple.predict([[age_pred, revenu_pred]])[0]
-                st.success(f"💰 CA estimé: {format_fcfa(pred)}")
+            st.markdown("### Prédiction personnalisée")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                age_pred = st.slider("Âge du client", 18, 70, 35)
+                revenu_pred = st.number_input("Revenu annuel (FCFA)", 500000, 8000000, 2500000, step=100000)
+            
+            with col2:
+                if st.button("🎯 Prédire le CA", use_container_width=True):
+                    # Vérifier que reg_multiple existe
+                    if 'reg_multiple' in locals():
+                        prediction = reg_multiple.predict([[age_pred, revenu_pred]])[0]
+                        st.markdown(f"""
+                        <div style="text-align: center; background: #f0fff4; padding: 1rem; border-radius: 10px;">
+                            <i class="fas fa-chart-line" style="font-size: 2rem; color: #155724;"></i>
+                            <div style="font-size: 1.2rem; margin-top: 0.5rem;">CA annuel estimé</div>
+                            <div style="font-size: 2rem; font-weight: bold; color: #155724;">{format_fcfa(prediction)}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.warning("Veuillez d'abord entraîner le modèle dans l'onglet Régression")
     else:
-        st.info("Besoin d'au moins 5 clients actifs")
+        st.info("📊 Besoin d'au moins 5 clients actifs pour l'analyse. Continuez à collecter des données !")
 
-# PAGE 5: CLIENTS
+# ==================== PAGE 5: CLIENTS ====================
 elif menu == "Clients":
     st.markdown("## 👥 Gestion des clients")
     
@@ -788,11 +1298,11 @@ elif menu == "Clients":
     if st.session_state.historique_achats:
         st.markdown("### 📜 Historique des commandes")
         df_histo = pd.DataFrame(st.session_state.historique_achats)
-        df_histo['date'] = df_histo['date'].dt.strftime('%d/%m/%Y %H:%M')
+        df_histo['date'] = pd.to_datetime(df_histo['date']).dt.strftime('%d/%m/%Y %H:%M')
         df_histo['montant_fcfa'] = df_histo['montant_fcfa'].apply(format_fcfa)
         st.dataframe(df_histo, use_container_width=True)
 
-# PAGE 6: CONSEILS
+# ==================== PAGE 6: CONSEILS ====================
 else:
     st.markdown("## 💡 Conseils et bonnes pratiques")
     
@@ -831,8 +1341,8 @@ st.markdown(f"""
     <hr>
     <p>
         <i class="fas fa-store"></i> ShopAnalyzer by Armelle | 
-        <i class="fas fa-chart-bar"></i> Analyse descriptive complète |
-        <i class="fas fa-database"></i> Données synchronisées avec Supabase
+        <i class="fas fa-chart-bar"></i> Analyse descriptive complète (Produits, Catégories, Fidélité) |
+        <i class="fas fa-robot"></i> ML prédictif
     </p>
     <p>
         <i class="fas fa-money-bill-wave"></i> Toutes les valeurs en FCFA | 

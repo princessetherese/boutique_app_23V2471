@@ -1,8 +1,8 @@
-# app_supabase_final.py - Version avec Supabase intégré
+# app_supabase_sync.py - Version avec synchronisation Supabase
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
@@ -10,118 +10,122 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 from sklearn.metrics import r2_score, silhouette_score
-from supabase import create_client, Client
 import time
 import warnings
-import hashlib
 warnings.filterwarnings('ignore')
 
 # ==================== CONFIGURATION SUPABASE ====================
-# ⚠️ REMPLACEZ PAR VOS IDENTIFIANTS SUPABASE ⚠️
-SUPABASE_URL = "https://lojxytucxpxvxvqdelue.supabase.co"  # Ex: https://abcdefghijk.supabase.co
-SUPABASE_ANON_KEY = "sb_publishable_dABCJ88o2IvCZTrPHpuR3g_A0zl6Q57"  # Ex: eyJhbGciOiJIUzI1NiIs...
+SUPABASE_URL = "https://lojxytucxpxvxvqdelue.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_dABCJ88o2IvCZTrPHpuR3g_A0zl6Q57"
 
-@st.cache_resource
-def init_supabase() -> Client:
-    """Initialise la connexion Supabase"""
-    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+try:
+    from supabase import create_client, Client
+    supabase_available = True
+except ImportError:
+    supabase_available = False
+    st.warning("⚠️ Supabase non installé. Installation: pip install supabase")
 
-def hash_password(password: str) -> str:
-    """Hache le mot de passe"""
-    return hashlib.sha256(password.encode()).hexdigest()
+def init_supabase():
+    if supabase_available:
+        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    return None
 
 # ==================== FONCTIONS SUPABASE ====================
-def register_user(supabase, username, password, email, ville, age):
-    """Enregistre un nouvel utilisateur dans la table users"""
+def save_client_to_supabase(supabase, client_data):
+    """Sauvegarde un client dans Supabase"""
     try:
         data = {
-            'username': username,
-            'password': hash_password(password),
-            'email': email,
-            'ville': ville,
-            'age': age,
-            'created_at': datetime.now().isoformat(),
-            'last_login': None,
-            'total_depenses': 0,
-            'nb_commandes': 0
+            'client_id': int(client_data['client_id']),
+            'nom': client_data['nom'],
+            'email': client_data['email'],
+            'age': int(client_data['âge']),
+            'ville': client_data['ville'],
+            'revenu_annuel_fcfa': int(client_data['revenu_annuel_fcfa']),
+            'ca_total_fcfa': int(client_data['ca_total_fcfa']),
+            'nb_achats': int(client_data['nb_achats'])
         }
-        result = supabase.table('users').insert(data).execute()
-        return True, "✅ Compte créé avec succès !"
+        supabase.table('clients').upsert(data).execute()
+        return True
     except Exception as e:
-        if 'duplicate' in str(e).lower():
-            return False, "❌ Ce nom d'utilisateur existe déjà !"
-        return False, f"❌ Erreur: {str(e)[:100]}"
+        return False
 
-def login_user(supabase, username, password):
-    """Connecte un utilisateur"""
+def save_order_to_supabase(supabase, order_data):
+    """Sauvegarde une commande dans Supabase"""
     try:
-        hashed = hash_password(password)
-        result = supabase.table('users').select('*').eq('username', username).eq('password', hashed).execute()
+        data = {
+            'date': order_data['date'].isoformat() if hasattr(order_data['date'], 'isoformat') else order_data['date'],
+            'client_id': int(order_data['client_id']),
+            'produits': ','.join(order_data['produits']),
+            'montant_fcfa': int(order_data['montant_fcfa']),
+            'mode_paiement': order_data['mode_paiement'],
+            'nb_articles': int(order_data['nb_articles'])
+        }
+        supabase.table('commandes').insert(data).execute()
+        return True
+    except Exception as e:
+        print(f"Erreur: {e}")
+        return False
+
+def load_all_clients_from_supabase(supabase):
+    """Charge tous les clients depuis Supabase"""
+    try:
+        result = supabase.table('clients').select('*').execute()
         if result.data:
-            # Mettre à jour last_login
-            supabase.table('users').update({'last_login': datetime.now().isoformat()}).eq('username', username).execute()
-            return True, result.data[0]
-        return False, None
-    except Exception as e:
-        return False, None
-
-def get_user_data(supabase, username):
-    """Récupère les données d'un utilisateur"""
-    try:
-        result = supabase.table('users').select('*').eq('username', username).execute()
-        return result.data[0] if result.data else None
+            df = pd.DataFrame(result.data)
+            df = df.rename(columns={
+                'age': 'âge',
+                'client_id': 'client_id',
+                'nom': 'nom',
+                'email': 'email',
+                'ville': 'ville',
+                'revenu_annuel_fcfa': 'revenu_annuel_fcfa',
+                'ca_total_fcfa': 'ca_total_fcfa',
+                'nb_achats': 'nb_achats'
+            })
+            return df
+        return None
     except:
         return None
 
-def save_order_to_supabase(supabase, username, order_data):
-    """Enregistre une commande dans la table commandes"""
-    try:
-        data = {
-            'username': username,
-            'date': datetime.now().isoformat(),
-            'montant_fcfa': order_data['montant_total'],
-            'nb_articles': order_data['nb_articles'],
-            'produits': ','.join(order_data['produits']),
-            'mode_paiement': order_data['mode_paiement'],
-            'categorie_principale': order_data.get('categorie_principale', '')
-        }
-        result = supabase.table('commandes').insert(data).execute()
-        
-        # Mettre à jour les stats utilisateur
-        user = get_user_data(supabase, username)
-        if user:
-            supabase.table('users').update({
-                'total_depenses': user.get('total_depenses', 0) + order_data['montant_total'],
-                'nb_commandes': user.get('nb_commandes', 0) + 1
-            }).eq('username', username).execute()
-        return True
-    except Exception as e:
-        st.error(f"Erreur sauvegarde: {e}")
-        return False
-
-def get_user_orders(supabase, username):
-    """Récupère les commandes d'un utilisateur"""
-    try:
-        result = supabase.table('commandes').select('*').eq('username', username).order('date', desc=True).execute()
-        return result.data if result.data else []
-    except:
-        return []
-
-def get_all_orders(supabase):
-    """Récupère toutes les commandes (admin)"""
+def load_all_orders_from_supabase(supabase):
+    """Charge toutes les commandes depuis Supabase"""
     try:
         result = supabase.table('commandes').select('*').order('date', desc=True).execute()
-        return result.data if result.data else []
+        if result.data:
+            orders = []
+            for item in result.data:
+                orders.append({
+                    'date': pd.to_datetime(item['date']),
+                    'client_id': item['client_id'],
+                    'produits': item['produits'].split(','),
+                    'montant_fcfa': item['montant_fcfa'],
+                    'mode_paiement': item['mode_paiement'],
+                    'nb_articles': item['nb_articles']
+                })
+            return orders
+        return None
     except:
-        return []
+        return None
 
-def get_all_users(supabase):
-    """Récupère tous les utilisateurs"""
-    try:
-        result = supabase.table('users').select('*').order('created_at', desc=True).execute()
-        return result.data if result.data else []
-    except:
-        return []
+def sync_all_to_supabase(supabase, df_clients, historique_achats):
+    """Synchronise toutes les données vers Supabase"""
+    if not supabase:
+        return 0, 0
+    
+    clients_saved = 0
+    orders_saved = 0
+    
+    # Sauvegarde des clients
+    for _, client in df_clients.iterrows():
+        if save_client_to_supabase(supabase, client.to_dict()):
+            clients_saved += 1
+    
+    # Sauvegarde des commandes
+    for order in historique_achats:
+        if save_order_to_supabase(supabase, order):
+            orders_saved += 1
+    
+    return clients_saved, orders_saved
 
 # ==================== CONFIGURATION ====================
 st.set_page_config(
@@ -292,15 +296,6 @@ st.markdown("""
         border: 1px solid #e2e8f0;
     }
     
-    .login-container {
-        max-width: 450px;
-        margin: 50px auto;
-        padding: 30px;
-        background: white;
-        border-radius: 20px;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-    }
-    
     @media (max-width: 768px) {
         .metric-card {
             padding: 0.8rem;
@@ -308,6 +303,38 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# ==================== INITIALISATION ====================
+supabase = init_supabase()
+
+# Vérifier si les données existent déjà en base
+existing_clients = load_all_clients_from_supabase(supabase) if supabase else None
+existing_orders = load_all_orders_from_supabase(supabase) if supabase else None
+
+if existing_clients is not None and len(existing_clients) > 0:
+    # Charger depuis Supabase
+    st.session_state.df_clients = existing_clients
+    st.session_state.historique_achats = existing_orders if existing_orders else []
+    st.session_state.data_source = "Supabase"
+    st.session_state.synced = True
+else:
+    # Générer les données locales
+    np.random.seed(42)
+    n = 100
+    
+    st.session_state.df_clients = pd.DataFrame({
+        'client_id': range(1, n+1),
+        'nom': [f"Client_{i}" for i in range(1, n+1)],
+        'email': [f"client{i}@email.com" for i in range(1, n+1)],
+        'âge': np.random.normal(35, 12, n).clip(18, 70).astype(int),
+        'ville': np.random.choice(['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'], n),
+        'revenu_annuel_fcfa': np.random.normal(2_500_000, 800_000, n).clip(1_000_000, 8_000_000).astype(int),
+        'ca_total_fcfa': np.random.exponential(500000, n).astype(int),
+        'nb_achats': np.random.poisson(3, n)
+    })
+    st.session_state.historique_achats = []
+    st.session_state.data_source = "Local"
+    st.session_state.synced = False
 
 # ==================== CATALOGUE PRODUITS ====================
 PRODUITS = {
@@ -336,147 +363,98 @@ def format_fcfa(x):
         return "0 FCFA"
     return f"{x:,.0f} FCFA".replace(",", " ")
 
-# ==================== PAGE DE CONNEXION ====================
-def show_login():
-    """Affiche la page de connexion"""
-    supabase = init_supabase()
+def enregistrer_achat(client_id, produits_achetes, montant_total, mode_paiement):
+    achat = {
+        'date': datetime.now(),
+        'client_id': client_id,
+        'produits': produits_achetes,
+        'montant_fcfa': montant_total,
+        'mode_paiement': mode_paiement,
+        'nb_articles': len(produits_achetes)
+    }
+    st.session_state.historique_achats.append(achat)
     
-    st.markdown("""
-    <div class="login-container">
-        <div style="text-align:center">
-            <h1 style="color:#667eea">🛍️ ShopAnalyzer Pro</h1>
-            <p>Connectez-vous pour accéder à votre espace</p>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    idx = st.session_state.df_clients[st.session_state.df_clients['client_id'] == client_id].index[0]
+    st.session_state.df_clients.loc[idx, 'ca_total_fcfa'] += montant_total
+    st.session_state.df_clients.loc[idx, 'nb_achats'] += 1
     
-    col1, col2, col3 = st.columns([1, 1.5, 1])
+    # Sauvegarder dans Supabase si disponible
+    if supabase:
+        save_client_to_supabase(supabase, st.session_state.df_clients.loc[idx].to_dict())
+        save_order_to_supabase(supabase, achat)
     
-    with col2:
-        tab1, tab2 = st.tabs(["🔐 CONNEXION", "📝 INSCRIPTION"])
-        
-        with tab1:
-            username = st.text_input("Nom d'utilisateur", key="login_user")
-            password = st.text_input("Mot de passe", type="password", key="login_pwd")
-            
-            if st.button("Se connecter", use_container_width=True):
-                if username and password:
-                    success, user_data = login_user(supabase, username, password)
-                    if success:
-                        st.session_state.authenticated = True
-                        st.session_state.username = username
-                        st.session_state.user_data = user_data
-                        st.session_state.supabase = supabase
-                        st.rerun()
-                    else:
-                        st.error("❌ Identifiants incorrects !")
-                else:
-                    st.warning("Veuillez remplir tous les champs")
-        
-        with tab2:
-            new_user = st.text_input("Nom d'utilisateur", key="reg_user")
-            new_pwd = st.text_input("Mot de passe", type="password", key="reg_pwd")
-            confirm_pwd = st.text_input("Confirmer le mot de passe", type="password")
-            email = st.text_input("Email", key="reg_email")
-            ville = st.selectbox("Ville", ['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'])
-            age = st.number_input("Âge", 18, 100, 30)
-            
-            if st.button("Créer mon compte", use_container_width=True):
-                if new_user and new_pwd and email:
-                    if new_pwd != confirm_pwd:
-                        st.error("❌ Les mots de passe ne correspondent pas !")
-                    elif len(new_pwd) < 4:
-                        st.error("❌ Mot de passe trop court (min 4 caractères)")
-                    else:
-                        success, msg = register_user(supabase, new_user, new_pwd, email, ville, age)
-                        if success:
-                            st.success(msg)
-                            st.balloons()
-                            st.info("Vous pouvez maintenant vous connecter")
-                        else:
-                            st.error(msg)
-                else:
-                    st.warning("Veuillez remplir tous les champs obligatoires")
+    return True
 
 # ==================== HEADER ====================
-def show_header():
-    supabase = st.session_state.get('supabase')
-    username = st.session_state.get('username')
-    
-    st.markdown(f"""
-    <div class="main-header">
-        <h1><i class="fas fa-store"></i> ShopAnalyzer Pro</h1>
-        <p><i class="fas fa-chart-line"></i> Plateforme intelligente de collecte et d'analyse de données e-commerce</p>
-        <p style="font-size: 0.85rem; margin-top: 0.5rem;">
-            <i class="fas fa-mobile-alt"></i> Interface responsive | 
-            <i class="fab fa-font-awesome"></i> Icônes Font Awesome | 
-            <i class="fas fa-chart-bar"></i> Analyse descriptive incluse
-        </p>
-        <p style="font-size: 0.8rem; margin-top: 0.5rem;">👋 Bienvenue <strong>{username}</strong> !</p>
-    </div>
-    """, unsafe_allow_html=True)
+data_source = st.session_state.get('data_source', 'Local')
+st.markdown(f"""
+<div class="main-header">
+    <h1><i class="fas fa-store"></i> ShopAnalyzer Pro</h1>
+    <p><i class="fas fa-chart-line"></i> Plateforme intelligente de collecte et d'analyse de données e-commerce</p>
+    <p style="font-size: 0.85rem; margin-top: 0.5rem;">
+        <i class="fas fa-database"></i> Source: <strong>{data_source}</strong> | 
+        <i class="fas fa-users"></i> {len(st.session_state.df_clients)} clients | 
+        <i class="fas fa-shopping-cart"></i> {len(st.session_state.historique_achats)} commandes
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# Bouton de synchronisation manuelle
+if supabase and not st.session_state.get('synced', False):
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🔄 Synchroniser les 100 clients avec Supabase", use_container_width=True):
+            with st.spinner("Synchronisation en cours..."):
+                clients_saved, orders_saved = sync_all_to_supabase(
+                    supabase, 
+                    st.session_state.df_clients, 
+                    st.session_state.historique_achats
+                )
+                st.session_state.synced = True
+                st.success(f"✅ Synchronisation terminée ! {clients_saved} clients et {orders_saved} commandes sauvegardés dans Supabase.")
+                time.sleep(2)
+                st.rerun()
 
 # ==================== SIDEBAR ====================
-def show_sidebar():
-    supabase = st.session_state.get('supabase')
-    user_data = st.session_state.get('user_data', {})
+with st.sidebar:
+    st.markdown("## 🎯 Navigation")
     
-    with st.sidebar:
-        st.markdown("## 🎯 Navigation")
-        
-        menu = st.radio(
-            "Menu",
-            ["Nouvelle Commande", "Tableau de Bord", "Analyse Descriptive", "Analyses ML", "Clients", "Conseils", "📜 Mon Historique"]
-        )
-        
-        st.markdown("---")
-        
-        # Infos utilisateur
-        st.markdown(f"""
-        <div style='background: #e9ecef; padding: 1rem; border-radius: 15px;'>
-            <div style='display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;'>
-                <i class='fas fa-user' style='font-size: 1.2rem; color: #667eea;'></i>
-                <div>
-                    <div style='font-size: 0.7rem; color: #666;'>UTILISATEUR</div>
-                    <div style='font-weight: bold;'>{st.session_state.get('username', '')}</div>
-                </div>
-            </div>
-            <div style='display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;'>
-                <i class='fas fa-shopping-cart' style='font-size: 1.2rem; color: #667eea;'></i>
-                <div>
-                    <div style='font-size: 0.7rem; color: #666;'>COMMANDES</div>
-                    <div style='font-weight: bold;'>{user_data.get('nb_commandes', 0)}</div>
-                </div>
-            </div>
-            <div style='display: flex; align-items: center; gap: 0.5rem;'>
-                <i class='fas fa-money-bill-wave' style='font-size: 1.2rem; color: #667eea;'></i>
-                <div>
-                    <div style='font-size: 0.7rem; color: #666;'>DÉPENSES</div>
-                    <div style='font-weight: bold;'>{format_fcfa(user_data.get('total_depenses', 0))}</div>
-                </div>
+    menu = st.radio(
+        "Menu",
+        ["Nouvelle Commande", "Tableau de Bord", "Analyse Descriptive", "Analyses ML", "Clients", "Conseils"]
+    )
+    
+    st.markdown("---")
+    
+    total_ventes = sum(a['montant_fcfa'] for a in st.session_state.historique_achats)
+    nb_commandes = len(st.session_state.historique_achats)
+    
+    st.markdown(f"""
+    <div style='background: #e9ecef; padding: 1rem; border-radius: 15px;'>
+        <div style='display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;'>
+            <i class='fas fa-money-bill-wave' style='font-size: 1.5rem; color: #667eea;'></i>
+            <div>
+                <div style='font-size: 0.7rem; color: #666;'>CA TOTAL</div>
+                <div style='font-weight: bold;'>{format_fcfa(total_ventes)}</div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        if st.button("🚪 Se déconnecter", use_container_width=True):
-            for key in ['authenticated', 'username', 'user_data', 'supabase']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
-        
-        st.markdown("---")
-        st.caption("Développé par **Armelle** | Version 5.0")
+        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+            <i class='fas fa-shopping-cart' style='font-size: 1.5rem; color: #667eea;'></i>
+            <div>
+                <div style='font-size: 0.7rem; color: #666;'>COMMANDES</div>
+                <div style='font-weight: bold;'>{nb_commandes}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    return menu
+    st.markdown("---")
+    st.caption("Développé par **Armelle** | Version Supabase")
 
-# ==================== PAGE NOUVELLE COMMANDE ====================
-def page_nouvelle_commande():
-    supabase = st.session_state.get('supabase')
-    username = st.session_state.get('username')
-    user_data = st.session_state.get('user_data', {})
-    
+# ==================== RESTE DU CODE (PAGES) ====================
+# [Le reste de votre code pour les pages reste exactement identique]
+# PAGE 1: FORMULAIRE
+if menu == "Nouvelle Commande":
     st.markdown("## 🛒 Passer une commande")
     
     with st.form("formulaire_achat", clear_on_submit=True):
@@ -484,14 +462,31 @@ def page_nouvelle_commande():
         
         with col1:
             st.markdown("### 👤 Vos informations")
-            nom = st.text_input("Nom complet", value=user_data.get('email', '').split('@')[0] if user_data else "")
-            email = st.text_input("Email", value=user_data.get('email', '') if user_data else "")
-            age = st.number_input("Âge", 18, 100, value=user_data.get('age', 30) if user_data else 30)
-            ville = st.selectbox("Ville", ['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'],
-                                index=0 if not user_data else (['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'].index(user_data.get('ville', 'Douala')) if user_data.get('ville') in ['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'] else 0))
+            
+            option_client = st.radio(
+                "Type de client",
+                ["Nouveau client", "Client existant"],
+                horizontal=True
+            )
+            
+            if option_client == "Client existant":
+                client_id = st.selectbox(
+                    "Sélectionnez votre compte",
+                    st.session_state.df_clients['client_id'].tolist(),
+                    format_func=lambda x: f"#{x} - {st.session_state.df_clients[st.session_state.df_clients['client_id']==x]['nom'].values[0]}"
+                )
+            else:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    nom = st.text_input("Nom complet", placeholder="Votre nom")
+                    age = st.number_input("Âge", 18, 100, 30)
+                with col_b:
+                    email = st.text_input("Email", placeholder="votre@email.com")
+                    ville = st.selectbox("Ville", ['Douala', 'Yaoundé', 'Garoua', 'Bafoussam', 'Bamenda'])
         
         with col2:
             st.markdown("### 🛍️ Votre panier")
+            
             produits_selectionnes = []
             montant_total = 0
             
@@ -513,7 +508,7 @@ def page_nouvelle_commande():
                             quantite = st.number_input(
                                 "Qté",
                                 min_value=0, max_value=5,
-                                key=f"{categorie}_{produit}",
+                                key=produit,
                                 label_visibility="collapsed"
                             )
                         with cols[2]:
@@ -527,6 +522,7 @@ def page_nouvelle_commande():
         
         st.markdown("---")
         st.markdown("### 💳 Paiement")
+        
         mode_paiement = st.selectbox("Choisissez votre moyen de paiement", MODES_PAIEMENT)
         
         st.markdown(f"""
@@ -544,42 +540,40 @@ def page_nouvelle_commande():
         if submitted:
             if montant_total == 0:
                 st.error("❌ Veuillez sélectionner au moins un produit !")
+            elif option_client == "Nouveau client" and ('nom' not in dir() or not nom):
+                st.error("❌ Veuillez remplir vos informations")
             else:
                 with st.spinner("⏳ Traitement de votre commande..."):
                     time.sleep(0.8)
                     
-                    order_data = {
-                        'montant_total': montant_total,
-                        'nb_articles': len(produits_selectionnes),
-                        'produits': produits_selectionnes,
-                        'mode_paiement': mode_paiement,
-                        'categorie_principale': 'General'
-                    }
+                    if option_client == "Nouveau client":
+                        new_id = len(st.session_state.df_clients) + 1
+                        nouveau_client = pd.DataFrame({
+                            'client_id': [new_id],
+                            'nom': [nom],
+                            'email': [email],
+                            'âge': [age],
+                            'ville': [ville],
+                            'revenu_annuel_fcfa': [0],
+                            'ca_total_fcfa': [0],
+                            'nb_achats': [0]
+                        })
+                        st.session_state.df_clients = pd.concat([st.session_state.df_clients, nouveau_client], ignore_index=True)
+                        client_id = new_id
+                    else:
+                        client_id = client_id
                     
-                    if save_order_to_supabase(supabase, username, order_data):
+                    if enregistrer_achat(client_id, produits_selectionnes, montant_total, mode_paiement):
                         st.balloons()
                         st.success(f"🎉 Commande confirmée ! Merci pour votre achat de {format_fcfa(montant_total)}")
-                        
-                        # Recharger les données utilisateur
-                        new_data = get_user_data(supabase, username)
-                        if new_data:
-                            st.session_state.user_data = new_data
-                        st.rerun()
-                    else:
-                        st.error("❌ Erreur lors de l'enregistrement")
 
-# ==================== PAGE TABLEAU DE BORD ====================
-def page_tableau_bord():
-    supabase = st.session_state.get('supabase')
-    
+# PAGE 2: DASHBOARD
+elif menu == "Tableau de Bord":
     st.markdown("## 📊 Tableau de bord")
     
-    all_orders = get_all_orders(supabase)
-    all_users = get_all_users(supabase)
-    
-    total_ventes = sum(o.get('montant_fcfa', 0) for o in all_orders)
-    nb_commandes = len(all_orders)
-    nb_clients = len(all_users)
+    total_ventes = sum(a['montant_fcfa'] for a in st.session_state.historique_achats)
+    nb_commandes = len(st.session_state.historique_achats)
+    nb_clients_actifs = len(st.session_state.df_clients[st.session_state.df_clients['nb_achats'] > 0])
     panier_moyen = total_ventes / nb_commandes if nb_commandes > 0 else 0
     
     col1, col2, col3, col4 = st.columns(4)
@@ -603,8 +597,8 @@ def page_tableau_bord():
     with col3:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-value">{nb_clients}</div>
-            <div class="metric-label">Clients</div>
+            <div class="metric-value">{nb_clients_actifs}</div>
+            <div class="metric-label">Clients actifs</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -616,11 +610,11 @@ def page_tableau_bord():
         </div>
         """, unsafe_allow_html=True)
     
-    if all_orders:
+    if st.session_state.historique_achats:
         col1, col2 = st.columns(2)
         
         with col1:
-            df_ventes = pd.DataFrame(all_orders)
+            df_ventes = pd.DataFrame(st.session_state.historique_achats)
             df_ventes['date'] = pd.to_datetime(df_ventes['date'])
             df_ventes['jour'] = df_ventes['date'].dt.date
             ventes_par_jour = df_ventes.groupby('jour')['montant_fcfa'].sum().reset_index()
@@ -633,10 +627,8 @@ def page_tableau_bord():
         
         with col2:
             tous_produits = []
-            for order in all_orders:
-                if order.get('produits'):
-                    produits = order['produits'].split(',')
-                    tous_produits.extend(produits)
+            for achat in st.session_state.historique_achats:
+                tous_produits.extend(achat['produits'])
             
             if tous_produits:
                 top_produits = pd.Series(tous_produits).value_counts().head(6)
@@ -646,179 +638,162 @@ def page_tableau_bord():
                 fig.update_layout(height=400)
                 st.plotly_chart(fig, use_container_width=True)
 
-# ==================== PAGE ANALYSE DESCRIPTIVE ====================
-def page_analyse_descriptive():
-    supabase = st.session_state.get('supabase')
-    
+# PAGE 3: ANALYSE DESCRIPTIVE (version simplifiée pour garder la place)
+elif menu == "Analyse Descriptive":
     st.markdown("## 📊 Analyse descriptive des données")
     st.markdown("*Statistiques détaillées et visualisations exploratoires*")
     
-    all_orders = get_all_orders(supabase)
-    all_users = get_all_users(supabase)
-    
-    if not all_orders:
-        st.info("📊 Aucune donnée disponible pour l'instant. Effectuez des commandes !")
-        return
-    
-    df_ventes = pd.DataFrame(all_orders)
-    df_ventes['date'] = pd.to_datetime(df_ventes['date'])
-    df_clients = pd.DataFrame(all_users) if all_users else pd.DataFrame()
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Clients", "🛍️ Ventes", "🏷️ Produits & Catégories", "⭐ Fidélité clients"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Clients", "🛍️ Ventes", "🏷️ Produits & Catégories", "⭐ Fidélité clients", "📈 Corrélations"])
     
     with tab1:
         st.markdown("### Analyse des clients")
-        
-        if not df_clients.empty:
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("👥 Total clients", len(df_clients))
-            with col2:
-                age_moyen = df_clients['age'].mean() if 'age' in df_clients else 0
-                st.metric("📅 Âge moyen", f"{age_moyen:.0f} ans")
-            with col3:
-                st.metric("📦 Clients actifs", len(df_clients[df_clients['nb_commandes'] > 0]))
-            with col4:
-                ca_moyen = df_clients['total_depenses'].mean()
-                st.metric("💰 CA moyen/client", format_fcfa(ca_moyen))
-            
-            # Distribution par ville
-            if 'ville' in df_clients:
-                ville_counts = df_clients['ville'].value_counts()
-                fig_ville = px.pie(values=ville_counts.values, names=ville_counts.index,
-                                  title="Clients par ville")
-                st.plotly_chart(fig_ville, use_container_width=True)
-    
-    with tab2:
-        st.markdown("### Analyse des ventes")
+        df_clients = st.session_state.df_clients
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("💰 CA Total", format_fcfa(df_ventes['montant_fcfa'].sum()))
+            st.metric("👥 Total clients", len(df_clients))
         with col2:
-            st.metric("📦 Nombre ventes", len(df_ventes))
+            st.metric("📅 Âge moyen", f"{df_clients['âge'].mean():.0f} ans")
         with col3:
-            st.metric("🛒 Panier moyen", format_fcfa(df_ventes['montant_fcfa'].mean()))
+            st.metric("💰 Revenu moyen", format_fcfa(df_clients['revenu_annuel_fcfa'].mean()))
         with col4:
-            st.metric("📊 Articles/commande", f"{df_ventes['nb_articles'].mean():.1f}")
+            st.metric("💵 CA moyen/client", format_fcfa(df_clients['ca_total_fcfa'].mean()))
         
-        # Évolution
-        ventes_jour = df_ventes.groupby(df_ventes['date'].dt.date)['montant_fcfa'].sum().reset_index()
-        fig_evol = px.line(ventes_jour, x='date', y='montant_fcfa',
-                          title="Évolution du chiffre d'affaires",
-                          markers=True)
-        st.plotly_chart(fig_evol, use_container_width=True)
+        fig_ages = px.histogram(df_clients, x='âge', nbins=30, title="Distribution des âges")
+        st.plotly_chart(fig_ages, use_container_width=True)
         
-        # Distribution
-        col1, col2 = st.columns(2)
-        with col1:
-            fig_montants = px.histogram(df_ventes, x='montant_fcfa', nbins=30,
-                                       title="Distribution des montants")
-            st.plotly_chart(fig_montants, use_container_width=True)
-        with col2:
-            fig_articles = px.histogram(df_ventes, x='nb_articles', nbins=10,
-                                       title="Distribution des articles")
-            st.plotly_chart(fig_articles, use_container_width=True)
-        
-        # Modes de paiement
-        paiements_counts = df_ventes['mode_paiement'].value_counts()
-        fig_paiements = px.pie(values=paiements_counts.values, names=paiements_counts.index,
-                              title="Modes de paiement")
-        st.plotly_chart(fig_paiements, use_container_width=True)
+        ville_counts = df_clients['ville'].value_counts()
+        fig_ville = px.pie(values=ville_counts.values, names=ville_counts.index, title="Clients par ville")
+        st.plotly_chart(fig_ville, use_container_width=True)
+    
+    with tab2:
+        st.markdown("### Analyse des ventes")
+        if st.session_state.historique_achats:
+            df_ventes = pd.DataFrame(st.session_state.historique_achats)
+            df_ventes['date'] = pd.to_datetime(df_ventes['date'])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("💰 CA Total", format_fcfa(df_ventes['montant_fcfa'].sum()))
+            with col2:
+                st.metric("📦 Nb commandes", len(df_ventes))
+            with col3:
+                st.metric("🛒 Panier moyen", format_fcfa(df_ventes['montant_fcfa'].mean()))
+            with col4:
+                st.metric("📊 Articles/commande", f"{df_ventes['nb_articles'].mean():.1f}")
+            
+            ventes_jour = df_ventes.groupby(df_ventes['date'].dt.date)['montant_fcfa'].sum().reset_index()
+            fig_evol = px.line(ventes_jour, x='date', y='montant_fcfa', title="Évolution du CA", markers=True)
+            st.plotly_chart(fig_evol, use_container_width=True)
+            
+            paiements_counts = df_ventes['mode_paiement'].value_counts()
+            fig_paiements = px.pie(values=paiements_counts.values, names=paiements_counts.index, title="Modes de paiement")
+            st.plotly_chart(fig_paiements, use_container_width=True)
+        else:
+            st.info("Aucune vente enregistrée")
     
     with tab3:
-        st.markdown("### Analyse des produits et catégories")
-        
-        tous_produits = []
-        for order in all_orders:
-            if order.get('produits'):
-                prods = order['produits'].split(',')
-                tous_produits.extend(prods)
-        
-        if tous_produits:
-            top_ventes = pd.Series(tous_produits).value_counts().head(10)
-            fig_top = px.bar(x=top_ventes.values, y=top_ventes.index, orientation='h',
-                            title="Top 10 des produits les plus vendus")
-            fig_top.update_layout(height=500)
-            st.plotly_chart(fig_top, use_container_width=True)
+        st.markdown("### Analyse des produits")
+        if st.session_state.historique_achats:
+            tous_produits = []
+            for cmd in st.session_state.historique_achats:
+                tous_produits.extend(cmd['produits'])
             
-            # Catégories
-            categories_counts = df_ventes['categorie_principale'].value_counts()
-            if len(categories_counts) > 0:
-                fig_cat = px.pie(values=categories_counts.values, names=categories_counts.index,
-                                title="Ventes par catégorie")
-                st.plotly_chart(fig_cat, use_container_width=True)
+            if tous_produits:
+                top_ventes = pd.Series(tous_produits).value_counts().head(10)
+                fig_top = px.bar(x=top_ventes.values, y=top_ventes.index, orientation='h', title="Top 10 des produits")
+                fig_top.update_layout(height=500)
+                st.plotly_chart(fig_top, use_container_width=True)
     
     with tab4:
-        st.markdown("### Analyse de la fidélité clients")
-        
-        if not df_clients.empty:
-            col1, col2, col3 = st.columns(3)
-            clients_actifs = len(df_clients[df_clients['nb_commandes'] > 0])
-            clients_fideles = len(df_clients[df_clients['nb_commandes'] >= 3])
-            
-            with col1:
-                st.metric("👥 Clients actifs", clients_actifs)
-            with col2:
-                st.metric("⭐ Clients fidèles", clients_fideles)
-            with col3:
-                taux = (clients_fideles / clients_actifs * 100) if clients_actifs > 0 else 0
-                st.metric("📈 Taux de fidélisation", f"{taux:.1f}%")
-            
-            # Distribution
-            fig_achats = px.histogram(df_clients, x='nb_commandes', nbins=15,
-                                     title="Distribution du nombre d'achats par client")
-            st.plotly_chart(fig_achats, use_container_width=True)
-            
-            # Top clients
-            top_fideles = df_clients.nlargest(10, 'nb_commandes')[['username', 'nb_commandes', 'total_depenses']]
-            top_fideles['total_depenses'] = top_fideles['total_depenses'].apply(format_fcfa)
-            st.dataframe(top_fideles, use_container_width=True)
-
-# ==================== PAGE ANALYSES ML ====================
-def page_analyses_ml():
-    st.markdown("## 📈 Analyses prédictives")
-    st.info("📊 Module d'analyse prédictive - Disponible avec plus de données")
-    
-    # Simulation simple
-    st.markdown("### 🔮 Simulateur de panier")
-    col1, col2 = st.columns(2)
-    with col1:
-        nb_produits = st.slider("Nombre de produits", 1, 10, 3)
-    with col2:
-        prix_moyen = st.number_input("Prix moyen (FCFA)", 5000, 500000, 40000)
-    
-    estimation = nb_produits * prix_moyen
-    st.success(f"💰 Estimation du panier : **{format_fcfa(estimation)}**")
-
-# ==================== PAGE CLIENTS ====================
-def page_clients():
-    supabase = st.session_state.get('supabase')
-    
-    st.markdown("## 👥 Gestion des clients")
-    
-    all_users = get_all_users(supabase)
-    
-    if all_users:
-        df_users = pd.DataFrame(all_users)
-        df_display = df_users[['username', 'email', 'ville', 'age', 'nb_commandes', 'total_depenses']].copy()
-        df_display['total_depenses'] = df_display['total_depenses'].apply(format_fcfa)
-        st.dataframe(df_display, use_container_width=True)
+        st.markdown("### Fidélité clients")
+        df_clients = st.session_state.df_clients
+        clients_actifs = len(df_clients[df_clients['nb_achats'] > 0])
+        clients_fideles = len(df_clients[df_clients['nb_achats'] >= 3])
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("👥 Total clients", len(df_users))
+            st.metric("👥 Clients actifs", clients_actifs)
         with col2:
-            st.metric("⭐ Clients actifs", len(df_users[df_users['nb_commandes'] > 0]))
+            st.metric("⭐ Clients fidèles", clients_fideles)
         with col3:
-            ca_moyen = df_users['total_depenses'].mean()
-            st.metric("💰 CA moyen/client", format_fcfa(ca_moyen))
-    else:
-        st.info("Aucun client enregistré")
+            taux = (clients_fideles / clients_actifs * 100) if clients_actifs > 0 else 0
+            st.metric("📈 Taux fidélisation", f"{taux:.1f}%")
+        
+        fig_achats = px.histogram(df_clients, x='nb_achats', nbins=15, title="Distribution des achats")
+        st.plotly_chart(fig_achats, use_container_width=True)
+    
+    with tab5:
+        st.markdown("### Corrélations")
+        df_clients = st.session_state.df_clients
+        cols_corr = ['âge', 'revenu_annuel_fcfa', 'ca_total_fcfa', 'nb_achats']
+        corr_matrix = df_clients[cols_corr].corr()
+        fig_corr = px.imshow(corr_matrix, text_auto=True, title="Matrice de corrélation", color_continuous_scale='RdBu')
+        st.plotly_chart(fig_corr, use_container_width=True)
 
-# ==================== PAGE CONSEILS ====================
-def page_conseils():
+# PAGE 4: ANALYSES ML
+elif menu == "Analyses ML":
+    st.markdown("## 📈 Analyses prédictives")
+    
+    df_ml = st.session_state.df_clients[st.session_state.df_clients['nb_achats'] > 0]
+    
+    if len(df_ml) > 5:
+        tab1, tab2, tab3 = st.tabs(["📊 Régression", "🎯 Clustering", "🔮 Prédiction"])
+        
+        with tab1:
+            X = df_ml[['âge', 'revenu_annuel_fcfa']]
+            y = df_ml['ca_total_fcfa']
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            reg_multiple = LinearRegression()
+            reg_multiple.fit(X_train, y_train)
+            score_multiple = reg_multiple.score(X_test, y_test)
+            
+            st.metric("R² Score", f"{max(0, score_multiple):.2%}")
+            
+            y_pred = reg_multiple.predict(X_test)
+            fig_compare = go.Figure()
+            fig_compare.add_trace(go.Scatter(x=y_test, y=y_pred, mode='markers', name='Prédictions'))
+            fig_compare.add_trace(go.Scatter(x=[y.min(), y.max()], y=[y.min(), y.max()], mode='lines', name='Idéal', line=dict(dash='dash', color='red')))
+            st.plotly_chart(fig_compare, use_container_width=True)
+        
+        with tab2:
+            features = df_ml[['âge', 'ca_total_fcfa']]
+            scaler = StandardScaler()
+            features_scaled = scaler.fit_transform(features)
+            kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+            df_ml['segment'] = kmeans.fit_predict(features_scaled)
+            
+            fig_clust = px.scatter(df_ml, x='ca_total_fcfa', y='âge', color='segment', size='nb_achats', title="Segmentation clients")
+            st.plotly_chart(fig_clust, use_container_width=True)
+        
+        with tab3:
+            age_pred = st.slider("Âge", 18, 70, 35)
+            revenu_pred = st.number_input("Revenu annuel (FCFA)", 500000, 8000000, 2500000)
+            if st.button("Prédire"):
+                pred = reg_multiple.predict([[age_pred, revenu_pred]])[0]
+                st.success(f"💰 CA estimé: {format_fcfa(pred)}")
+    else:
+        st.info("Besoin d'au moins 5 clients actifs")
+
+# PAGE 5: CLIENTS
+elif menu == "Clients":
+    st.markdown("## 👥 Gestion des clients")
+    
+    df_display = st.session_state.df_clients.copy()
+    df_display['ca_total_fcfa'] = df_display['ca_total_fcfa'].apply(format_fcfa)
+    df_display['revenu_annuel_fcfa'] = df_display['revenu_annuel_fcfa'].apply(format_fcfa)
+    st.dataframe(df_display, use_container_width=True)
+    
+    if st.session_state.historique_achats:
+        st.markdown("### 📜 Historique des commandes")
+        df_histo = pd.DataFrame(st.session_state.historique_achats)
+        df_histo['date'] = df_histo['date'].dt.strftime('%d/%m/%Y %H:%M')
+        df_histo['montant_fcfa'] = df_histo['montant_fcfa'].apply(format_fcfa)
+        st.dataframe(df_histo, use_container_width=True)
+
+# PAGE 6: CONSEILS
+else:
     st.markdown("## 💡 Conseils et bonnes pratiques")
     
     col1, col2 = st.columns(2)
@@ -845,95 +820,23 @@ def page_conseils():
                 <li><i class="fas fa-chart-bar"></i> Analyse descriptive complète</li>
                 <li><i class="fas fa-robot"></i> Prédiction du CA par IA</li>
                 <li><i class="fas fa-chart-line"></i> Segmentation clients</li>
-                <li><i class="fas fa-database"></i> Données persistantes (Supabase)</li>
+                <li><i class="fas fa-database"></i> Données persistantes Supabase</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
-# ==================== PAGE MON HISTORIQUE ====================
-def page_mon_historique():
-    supabase = st.session_state.get('supabase')
-    username = st.session_state.get('username')
-    user_data = st.session_state.get('user_data', {})
-    
-    st.markdown("## 📜 Mon historique de commandes")
-    
-    orders = get_user_orders(supabase, username)
-    
-    if orders:
-        df_orders = pd.DataFrame(orders)
-        df_orders['montant_fcfa'] = df_orders['montant_fcfa'].apply(format_fcfa)
-        df_orders['date'] = pd.to_datetime(df_orders['date']).dt.strftime('%d/%m/%Y à %H:%M')
-        st.dataframe(df_orders[['date', 'montant_fcfa', 'nb_articles', 'mode_paiement']], use_container_width=True)
-        
-        st.markdown("### 📊 Mes statistiques")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("💰 Total dépensé", format_fcfa(user_data.get('total_depenses', 0)))
-        with col2:
-            st.metric("📦 Nombre de commandes", user_data.get('nb_commandes', 0))
-        with col3:
-            panier_moyen = user_data.get('total_depenses', 0) / max(1, user_data.get('nb_commandes', 0))
-            st.metric("🛒 Panier moyen", format_fcfa(panier_moyen))
-        
-        # Badge de fidélité
-        nb_cmd = user_data.get('nb_commandes', 0)
-        if nb_cmd >= 10:
-            st.success("🏆 **AMBASSADEUR** - Client exceptionnel !")
-        elif nb_cmd >= 5:
-            st.success("⭐ **FIDÈLE** - Merci pour votre confiance !")
-        elif nb_cmd >= 2:
-            st.info("🌟 **CLIENT RÉGULIER** - Continuez comme ça !")
-        else:
-            st.info("🆕 **NOUVEAU CLIENT** - Faites plus d'achats pour débloquer des avantages !")
-    else:
-        st.info("📭 Aucune commande pour le moment. Effectuez votre premier achat !")
-
-# ==================== MAIN ====================
-def main():
-    # Initialiser l'état de session
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    
-    # Si non authentifié, afficher la page de connexion
-    if not st.session_state.authenticated:
-        show_login()
-    else:
-        # Afficher l'application principale
-        show_header()
-        menu = show_sidebar()
-        
-        if menu == "Nouvelle Commande":
-            page_nouvelle_commande()
-        elif menu == "Tableau de Bord":
-            page_tableau_bord()
-        elif menu == "Analyse Descriptive":
-            page_analyse_descriptive()
-        elif menu == "Analyses ML":
-            page_analyses_ml()
-        elif menu == "Clients":
-            page_clients()
-        elif menu == "Conseils":
-            page_conseils()
-        elif menu == "📜 Mon Historique":
-            page_mon_historique()
-    
-    # Footer
-    st.markdown(f"""
-    <div class="footer">
-        <hr>
-        <p>
-            <i class="fas fa-store"></i> ShopAnalyzer by Armelle | 
-            <i class="fas fa-chart-bar"></i> Analyse descriptive complète |
-            <i class="fas fa-database"></i> Données persistantes Supabase
-        </p>
-        <p>
-            <i class="fas fa-money-bill-wave"></i> Toutes les valeurs en FCFA | 
-            <i class="fas fa-calendar-alt"></i> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main() 
-               
+# ==================== FOOTER ====================
+st.markdown(f"""
+<div class="footer">
+    <hr>
+    <p>
+        <i class="fas fa-store"></i> ShopAnalyzer by Armelle | 
+        <i class="fas fa-chart-bar"></i> Analyse descriptive complète |
+        <i class="fas fa-database"></i> Données synchronisées avec Supabase
+    </p>
+    <p>
+        <i class="fas fa-money-bill-wave"></i> Toutes les valeurs en FCFA | 
+        <i class="fas fa-calendar-alt"></i> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+    </p>
+</div>
+""", unsafe_allow_html=True)
